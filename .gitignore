@@ -172,3 +172,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Training data and models.
+./asr_dataset/*
+./whisper-small-dv/*
