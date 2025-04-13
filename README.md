@@ -8,7 +8,7 @@ SyllaBERT is a syllable-aware variant of HuBERT that operates on raw audio and p
 
 ---
 
-## 🧱 Pipeline Overview
+## Pipeline Overview
 
 1. **Syllable Segmentation:** Detect syllables in raw speech using a valley-peak-valley heuristic over a modulation-based amplitude envelope  
 2. **MFCC Extraction:** Extract a single MFCC vector per syllable  
@@ -17,7 +17,7 @@ SyllaBERT is a syllable-aware variant of HuBERT that operates on raw audio and p
 
 ---
 
-## ⚙️ Environment Setup
+## Environment Setup
 
 ```bash
 conda create -n syllabert python=3.11
@@ -28,7 +28,7 @@ pip install torch torchaudio librosa tqdm scipy scikit-learn textgrid
 
 ---
 
-## 🎧 1. Download LibriSpeech 100h Subset
+## 1. Download LibriSpeech 100h Subset
 
 ```bash
 mkdir -p ~/datasets/LibriSpeech
@@ -39,7 +39,7 @@ tar -xvzf train-clean-100.tar.gz
 
 ---
 
-## 🎙 2. Segment Audio and Extract MFCCs
+## 2. Segment Audio and Extract MFCCs
 
 ```bash
 python segment_mean_mfcc_librispeech.py \
@@ -55,7 +55,7 @@ This script:
 
 ---
 
-## 🔀 3. Cluster Syllable MFCCs
+## 3. Cluster Syllable MFCCs
 
 ```bash
 python cluster_syllable_vectors.py \
@@ -76,7 +76,7 @@ Output:
 
 ---
 
-## 🚀 4. Train the SyllaBERT Model
+## 4. Train the SyllaBERT Model
 
 ```bash
 python train_syllabert.py
@@ -96,7 +96,7 @@ This script:
 
 ---
 
-## 📂 Directory Layout
+## Directory Layout
 
 ```
 data/
@@ -111,7 +111,7 @@ data/
 
 ---
 
-## 📒 Notes
+## Notes
 
 - Syllables are pooled from raw waveforms; targets are cluster IDs over syllable MFCCs.
 - The architecture matches HuBERT, but the learning unit is a syllable.
@@ -119,7 +119,6 @@ data/
 
 ---
 
-## 📚 References
+## References
 
 - Hsu et al., 2021. [HuBERT: Self-Supervised Speech Representation Learning by Masked Prediction of Hidden Units](https://arxiv.org/abs/2106.07447)
-```
