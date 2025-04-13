@@ -2,8 +2,6 @@
 CIS 6200 - Advanced Deep Learning final project
 
 ---
-
-```markdown
 # SyllaBERT: Syllable-Aware HuBERT Pretraining
 
 SyllaBERT is a syllable-aware variant of HuBERT that operates on raw audio and predicts discrete pseudo-labels over syllables rather than fixed frames. This enables more linguistically grounded modeling of spoken language with better data and parameter efficiency.
