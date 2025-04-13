@@ -23,7 +23,7 @@ SyllaBERT is a syllable-aware variant of HuBERT that operates on raw audio and p
 conda create -n syllabert python=3.11
 conda activate syllabert
 
-pip install torch torchaudio librosa tqdm scipy scikit-learn textgrid
+pip install torch torchaudio librosa tqdm scipy scikit-learn praatio
 ```
 
 ---
