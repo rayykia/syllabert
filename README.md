@@ -59,6 +59,7 @@ This script:
 
 ```bash
 python cluster_syllable_vectors.py \
+  --vectors_file ./data/syllabert_clean100/features/syllable_mfcc_vectors.npy \
   --manifest ./data/syllabert_clean100/features/manifest.jsonl \
   --output_dir ./data/syllabert_clean100/clustering \
   --n_clusters 100
