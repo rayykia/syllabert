@@ -69,14 +69,14 @@ def train():
             targets = torch.cat(targets).to(device)
 
             # Forward pass with self-supervised masking on the convolutional features.
-            logits = model(
+            logits, mask_flags = model(
                 inputs,
                 syllable_segments=segments,
                 apply_mask=True,
                 mask_prob=mask_prob,
                 mask_length=default_mask_length
             )
-            loss = model.compute_loss(logits, targets)
+            loss = model.compute_loss(logits, targets, mask_flags=mask_flags)
 
             optimizer.zero_grad()
             loss.backward()
