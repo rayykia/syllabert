@@ -1,28 +1,16 @@
-# syllabert_model.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
-import copy
-
-def hubert_style_mask(batch_size, seq_len, mask_prob, mask_length):
-    """
-    Fallback masking function that masks random contiguous spans if syllable segments are not provided.
-    Returns a boolean mask of shape (batch_size, seq_len).
-    """
-    mask = torch.zeros((batch_size, seq_len), dtype=torch.bool)
-    num_mask = int(mask_prob * seq_len / mask_length + 0.5)
-    for b in range(batch_size):
-        if seq_len - mask_length > 0:
-            mask_starts = torch.randperm(seq_len - mask_length)[:num_mask]
-            for start in mask_starts:
-                mask[b, start:start + mask_length] = True
-    return mask
-
 
 class SyllaBERTEncoder(nn.Module):
-    def __init__(self, input_dim=1, embed_dim=768, num_layers=12, num_heads=12, dropout=0.1, conv_layers=None):
+    """
+    Convolutional encoder: raw waveform -> frame-level features
+    """
+    def __init__(self,
+                 input_dim=1,
+                 embed_dim=768,
+                 conv_layers=None):
         super().__init__()
         if conv_layers is None:
             conv_layers = [
@@ -34,194 +22,149 @@ class SyllaBERTEncoder(nn.Module):
                 (512, 2, 2),
                 (embed_dim, 2, 2)
             ]
-        self.conv_layers = conv_layers
-        self.feature_extractor = nn.Sequential(
-            *[nn.Sequential(
-                nn.Conv1d(
-                    in_channels=input_dim if i == 0 else conv_layers[i-1][0],
-                    out_channels=out_channels,
-                    kernel_size=kernel_size,
-                    stride=stride
-                ),
-                nn.ReLU()
-            )
-              for i, (out_channels, kernel_size, stride) in enumerate(conv_layers)]
-        )
+        layers = []
+        for i, (out_c, k, s) in enumerate(conv_layers):
+            in_c = input_dim if i == 0 else conv_layers[i-1][0]
+            layers += [nn.Conv1d(in_c, out_c, k, stride=s), nn.ReLU()]
+        self.feature_extractor = nn.Sequential(*layers)
 
-        self.pos_embedding = nn.Embedding(5000, embed_dim)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dropout=dropout)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.layer_norm = nn.LayerNorm(embed_dim)
-        
-        # Learnable mask embedding to replace masked features.
-        self.mask_embedding = nn.Parameter(torch.randn(embed_dim))
+    def forward(self, x):
+        # x: [B,1,T] -> [B,C,T'] -> [B,T',C]
+        f = self.feature_extractor(x)
+        return f.transpose(1, 2)
 
-    def forward(self, x, src_key_padding_mask=None, apply_mask=False, mask_prob=0.65, mask_length=10, syllable_segments=None):
-        """
-        Args:
-            x (torch.Tensor): Input waveform tensor of shape (B, 1, T).
-            src_key_padding_mask (torch.BoolTensor): Optional padding mask.
-            apply_mask (bool): Whether to apply masking.
-            mask_prob (float): Probability of masking (for syllable‐level masking, applied per syllable).
-            mask_length (int): Used for fallback frame-level masking.
-            syllable_segments (list or None): For each batch item, a list of tuples (start, end) indicating 
-                                              syllable boundaries on the convolutional output timeline.
-        Returns:
-            If syllable_segments is provided and apply_mask is True:
-                A tuple (x, seg_mask) where x has shape (B, T', embed_dim) and seg_mask is a boolean tensor (B, T')
-                indicating which time frames were replaced with the mask embedding.
-            Otherwise, just returns x.
-        """
-        # Adjust src_key_padding_mask through the convolutional strides.
-        for layer in self.feature_extractor:
-            if src_key_padding_mask is not None and isinstance(layer, nn.Sequential):
-                stride = layer[0].stride[0]
-                src_key_padding_mask = src_key_padding_mask[:, ::stride]
-        
-        # Extract features via convolutional layers.
-        x = self.feature_extractor(x)  # (B, embed_dim, T')
-        x = x.transpose(1, 2)          # (B, T', embed_dim)
 
-        seg_mask = None  # Will hold the per-frame mask indicators if computed.
-        if apply_mask:
-            B, T, C = x.shape
-            if syllable_segments is not None:
-                # Initialize per-frame mask.
-                seg_mask = torch.zeros((B, T), dtype=torch.bool, device=x.device)
-                # For each batch item, for each provided syllable segment,
-                # decide (with probability mask_prob) whether to mask the entire segment.
-                for b, segments in enumerate(syllable_segments):
-                    for (start, end) in segments:
-                        # Clip indices to be within [0, T].
-                        s = max(0, start)
-                        e = min(T, end)
-                        if s < e and torch.rand(1).item() < mask_prob:
-                            seg_mask[b, s:e] = True
-                # Replace masked frames with mask embedding using an out-of-place operation.
-                mask_embed = self.mask_embedding.unsqueeze(0).unsqueeze(0).expand_as(x)
-                x = torch.where(seg_mask.unsqueeze(-1), mask_embed, x)
-            else:
-                # Fallback to frame-level contiguous masking.
-                mask = hubert_style_mask(B, T, mask_prob, mask_length).to(x.device)
-                seg_mask = mask  # In this case, seg_mask is the mask over frames.
-                mask_embed = self.mask_embedding.unsqueeze(0).unsqueeze(0).expand(B, T, C)
-                x = torch.where(mask.unsqueeze(-1), mask_embed, x)
-        
-        # Add positional embeddings.
-        positions = torch.arange(0, x.size(1), dtype=torch.long, device=x.device).unsqueeze(0)
-        x = x + self.pos_embedding(positions)
-
-        # Pass through transformer encoder.
-        x = x.transpose(0, 1)  # (T', B, embed_dim)
-        x = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
-        x = x.transpose(0, 1)  # (B, T', embed_dim)
-        x = self.layer_norm(x)
-        # Return (x, seg_mask) if we computed mask information, else just x.
-        return (x, seg_mask) if seg_mask is not None else x
-
+def hubert_style_mask_segments(boundary_targets, mask_prob):
+    """
+    Generate a boolean mask per frame by randomly masking whole syllable segments.
+    boundary_targets: [B, T'] binary tensor indicating boundaries after frame t
+    Returns: mask_indices [B, T']
+    """
+    B, T = boundary_targets.shape
+    mask = torch.zeros((B, T), dtype=torch.bool, device=boundary_targets.device)
+    for b in range(B):
+        # find segment boundaries
+        # boundaries at True, so segment spans between them
+        boundaries = boundary_targets[b].nonzero(as_tuple=False).squeeze(1).tolist()
+        # ensure start=0, end=T
+        seg_points = [0] + boundaries + [T]
+        # build list of (start,end)
+        segments = [(seg_points[i], seg_points[i+1]) for i in range(len(seg_points)-1)]
+        # sample segments to mask
+        num_mask = int(len(segments) * mask_prob + 0.5)
+        if num_mask > 0:
+            idxs = torch.randperm(len(segments), device=boundary_targets.device)[:num_mask]
+            for i in idxs:
+                s,e = segments[i]
+                mask[b, s:e] = True
+    return mask
 
 class SyllaBERT(nn.Module):
-    def __init__(self, input_dim=1, embed_dim=768, num_layers=12, num_heads=12, num_classes=100):
+    """
+    SyllaBERT with syllable-level masking based on boundary targets.
+    """
+    def __init__(self,
+                 input_dim=1,
+                 embed_dim=768,
+                 num_layers=12,
+                 num_heads=12,
+                 num_classes=100,
+                 dropout=0.1,
+                 max_frames=5000):
         super().__init__()
-        self.encoder = SyllaBERTEncoder(input_dim, embed_dim, num_layers, num_heads)
+        # encoder
+        self.encoder = SyllaBERTEncoder(input_dim, embed_dim)
+        # mask embedding
+        self.mask_embedding = nn.Parameter(torch.randn(embed_dim))
+        # positional embeddings
+        self.pos_embedding = nn.Embedding(max_frames, embed_dim)
+        # transformer
+        enc_layer = nn.TransformerEncoderLayer(d_model=embed_dim,
+                                               nhead=num_heads,
+                                               dropout=dropout)
+        self.transformer = nn.TransformerEncoder(enc_layer,
+                                                 num_layers=num_layers)
+        self.layer_norm = nn.LayerNorm(embed_dim)
+        # projection head for cluster prediction
         self.projection = nn.Linear(embed_dim, num_classes)
-
-    def forward(self, x, syllable_segments, apply_mask=False, mask_prob=0.65, mask_length=10):
-        """
-        Args:
-            x (torch.Tensor): Input waveform tensor of shape (B, 1, T).
-            syllable_segments (list): For each batch item, a list of (start, end) tuples for syllable boundaries.
-            apply_mask (bool): Whether to apply syllable-level masking.
-            mask_prob (float): Probability of masking each syllable (if apply_mask True).
-            mask_length (int): Ignored if syllable segments are provided.
-        Returns:
-            If apply_mask and syllable_segments are provided:
-                A tuple (logits, mask_flags) where:
-                  - logits is a tensor of shape (total_syllables, num_classes),
-                  - mask_flags is a Boolean tensor (total_syllables,) where True indicates the syllable was masked.
-            Otherwise:
-                Just returns logits.
-        """
-        # Forward pass through encoder.
-        enc_out = self.encoder(
-            x,
-            apply_mask=apply_mask,
-            mask_prob=mask_prob,
-            mask_length=mask_length,
-            syllable_segments=syllable_segments
+        # boundary head for segmentation
+        self.boundary_pred = nn.Sequential(
+            nn.Conv1d(embed_dim, embed_dim, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(embed_dim, 1, 1),
+            nn.Sigmoid()
         )
-        if apply_mask and syllable_segments is not None:
-            # When masking is enabled, the encoder returns (encoded, seg_mask).
-            encoded, seg_mask = enc_out
-        else:
-            encoded = enc_out
-            seg_mask = None
 
-        pooled_reps = []
-        mask_flags = []  # For each syllable, record whether it was masked.
-        # For each batch item, pool encoder outputs over each syllable segment.
-        for b, segments in enumerate(syllable_segments):
-            for (start, end) in segments:
-                segment_rep = encoded[b, start:end].mean(dim=0)
-                pooled_reps.append(segment_rep)
-                # If seg_mask is available, decide if the entire segment was masked.
-                if seg_mask is not None:
-                    # The syllable is considered masked only if ALL frames in it were masked.
-                    is_masked = torch.all(seg_mask[b, start:end]).item()
-                    mask_flags.append(is_masked)
-                else:
-                    # If no segmentation mask is available, default to False.
-                    mask_flags.append(False)
-        # Stack pooled representations.
-        pooled = torch.stack(pooled_reps, dim=0)  # (total_syllables, embed_dim)
-        logits = self.projection(pooled)
-        # If masking is enabled, return both logits and mask flags.
-        if apply_mask and syllable_segments is not None:
-            # Convert mask_flags list to a tensor.
-            mask_flags = torch.tensor(mask_flags, dtype=torch.bool, device=logits.device)
-            return logits, mask_flags
-        else:
-            return logits
-
-    def compute_loss(self, logits, target, mask_flags=None):
+    def forward(self,
+                x,
+                boundary_targets=None,
+                apply_mask=False,
+                mask_prob=0.65):
         """
-        Computes cross-entropy loss.
-        
-        If mask_flags is provided, targets for unmasked syllables are set to ignore_index (-100)
-        so that loss is computed only on masked syllables.
-        
         Args:
-            logits (torch.Tensor): (total_syllables, num_classes)
-            target (torch.Tensor): (total_syllables,)
-            mask_flags (torch.BoolTensor, optional): Boolean tensor (total_syllables,).
+          x: [B,1,T] raw waveform
+          boundary_targets: [B,T'] binary frame-level boundaries (gold) or None
+          apply_mask: mask whole syllable segments
+          mask_prob: fraction of syllables to mask
         Returns:
-            Loss value.
+          logits: [B,T',num_classes]
+          mask_indices: [B,T'] boolean
+          boundary_prob: [B,T']
         """
-        if mask_flags is not None:
-            # Create a copy of target so as not to modify the original.
-            target = target.clone()
-            # Set targets for unmasked segments to ignore index.
-            target[~mask_flags] = -100
-        return F.cross_entropy(logits, target, ignore_index=-100)
+        # extract frame features
+        feats = self.encoder(x)  # [B,T',C]
+        B, T, C = feats.shape
+        # boundary prediction
+        bp = feats.transpose(1,2)  # [B,C,T']
+        boundary_prob = self.boundary_pred(bp).squeeze(1)  # [B,T']
+        # determine mask indices
+        mask_indices = None
+        if apply_mask:
+            if boundary_targets is None:
+                raise ValueError("boundary_targets required for syllable-level masking")
+            mask_indices = hubert_style_mask_segments(boundary_targets, mask_prob)
+            # mask embedding
+            mask_e = self.mask_embedding.unsqueeze(0).unsqueeze(0).expand(B, T, C)
+            feats = torch.where(mask_indices.unsqueeze(-1), mask_e, feats)
+        # positional embedding
+        pos = torch.arange(T, device=feats.device).unsqueeze(0)
+        feats = feats + self.pos_embedding(pos)
+        # transformer
+        y = feats.transpose(0,1)  # [T',B,C]
+        y = self.transformer(y)
+        y = y.transpose(0,1)  # [B,T',C]
+        y = self.layer_norm(y)
+        # cluster logits
+        logits = self.projection(y)  # [B,T',num_classes]
+        return logits, mask_indices, boundary_prob
+
+    def compute_cluster_loss(self, logits, targets, mask_indices):
+        """
+        CE loss on masked syllable frames only; targets: [B,T']
+        """
+        if mask_indices is None:
+            raise ValueError("mask_indices required for cluster loss")
+        ml = logits[mask_indices]
+        mt = targets[mask_indices]
+        if ml.numel()==0:
+            return torch.tensor(0., device=ml.device)
+        return F.cross_entropy(ml, mt, ignore_index=-100)
+
+    def compute_boundary_loss(self, boundary_prob, boundary_targets):
+        """
+        BCE loss for boundary prediction
+        """
+        return F.binary_cross_entropy(boundary_prob, boundary_targets.float())
 
     def save_checkpoint(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(self.state_dict(), path)
 
     def load_checkpoint(self, path, map_location=None):
-        state_dict = torch.load(path, map_location=map_location)
-        self.load_state_dict(state_dict)
-        print(f"Model loaded from {path}")
+        state = torch.load(path, map_location=map_location)
+        self.load_state_dict(state)
+        print(f"Loaded checkpoint from {path}")
 
     def required_input_length(self):
-        length = 1
-        for layer in reversed(self.encoder.feature_extractor):
-            if isinstance(layer, nn.Sequential):
-                conv = layer[0]  # Assumes Conv1d followed by ReLU.
-                kernel_size = conv.kernel_size[0]
-                stride = conv.stride[0]
-                length = (length - 1) * stride + kernel_size
-        return length
-
-    def get_conv_layers(self):
-        return self.encoder.conv_layers
+        # implement if needed
+        raise NotImplementedError
