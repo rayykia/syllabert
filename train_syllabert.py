@@ -8,6 +8,7 @@ import argparse
 from datetime import datetime
 from loguru import logger
 import os
+import re
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -27,6 +28,15 @@ def get_device():
         return torch.device("mps")
     else:
         return torch.device("cpu")
+    
+
+def load_latest_checkpoint(checkpoint_dir):
+    checkpoint_files = [f for f in os.listdir(checkpoint_dir) if re.match(r'syllabert_epoch(\d+)\.pt', f)]
+    epochs = [int(re.search(r'epoch(\d+)', f).group(1)) for f in checkpoint_files]
+    latest_epoch = max(epochs)
+    latest_ckpt = f"syllabert_epoch{latest_epoch}.pt"
+    path = os.path.join(checkpoint_dir, latest_ckpt)
+    return path, latest_epoch
 
 
 def train(args):
@@ -47,8 +57,11 @@ def train(args):
                       num_classes=100).to(device)
     
     if args.c:
-        model.load_state_dict(torch.load("./checkpoints/syllabert_latest.pt"))
+        path, epoch_n = load_latest_checkpoint('./checkpoints/')
+        model.load_state_dict(torch.load(path))
+        logger.info(f"Loaded checkpoint: {path}")
     if args.continue_path is not None:
+        epoch_n = int(re.search(r'epoch(\d+)', args.continue_path).group(1))
         model.load_state_dict(torch.load(args.continue_path))
 
     dataset = SyllableDataset(
@@ -69,7 +82,8 @@ def train(args):
     num_epochs = 35
     log_interval = 100
 
-    for epoch in range(1, num_epochs+1):
+
+    for epoch in range(1+epoch_n, num_epochs+1 + epoch_n):
         model.train()
         total_loss = 0.0
 

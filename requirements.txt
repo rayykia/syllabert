@@ -7,3 +7,4 @@ scipy>=1.15.1
 praatio=6.2.0
 numpy>=1.26.4
 joblib>=1.4.2
+loguru
