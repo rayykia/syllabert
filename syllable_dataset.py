@@ -3,69 +3,68 @@
 import torch
 import json
 import librosa
-import numpy as np
-from torch.nn.utils.rnn import pad_sequence
 from collections import defaultdict
-import math
 
 class SyllableDataset(torch.utils.data.Dataset):
     def __init__(self, manifest_path, samplerate=16000):
         self.samplerate = samplerate
-
         with open(manifest_path, 'r') as f:
             entries = [json.loads(line) for line in f]
-
+        # group by utterance
         self.utterances = defaultdict(list)
-        for entry in entries:
-            utt_id = entry.get("utterance_id")
-            if utt_id is not None:
-                self.utterances[utt_id].append(entry)
-
+        for e in entries:
+            self.utterances[e["utterance_id"]].append(e)
+        # sort by segment_index
         for utt in self.utterances:
-            self.utterances[utt].sort(key=lambda e: e["segment_index"])
-
-        self.utterance_keys = list(self.utterances.keys())
+            self.utterances[utt].sort(key=lambda x: x["segment_index"])
+        self.keys = list(self.utterances.keys())
 
     def __len__(self):
-        return len(self.utterance_keys)
+        return len(self.keys)
 
     def __getitem__(self, idx):
-        utt_id = self.utterance_keys[idx]
-        segments = self.utterances[utt_id]
-
-        audio_file = segments[0]["audio_file"]
-        audio, _ = librosa.load(audio_file, sr=self.samplerate)
-
-        full_start = int(min(entry["segment_start"] for entry in segments) * self.samplerate)
-        full_end = int(max(entry["segment_end"] for entry in segments) * self.samplerate)
-        waveform = torch.tensor(audio[full_start:full_end], dtype=torch.float32).view(1, -1)
-
-        labels = [entry.get("cluster_id", -100) for entry in segments]
-        targets = torch.tensor(labels, dtype=torch.long)
-
-        # Convert syllable start/end times into frame indices after conv stack (stride=320)
-        conv_stride = 320
-        segments_frames = []
-        for entry in segments:
-            s = int((entry["segment_start"] * self.samplerate - full_start) / conv_stride)
-            e = int((entry["segment_end"] * self.samplerate - full_start) / conv_stride)
-            e = max(s + 1, e)  # ensure at least 1 frame
-            segments_frames.append((s, e))
-
-        return waveform, targets, segments_frames
+        utt_id = self.keys[idx]
+        segs = self.utterances[utt_id]
+        # load full waveform for that utterance
+        path = segs[0]["audio_file"]
+        y, _ = librosa.load(path, sr=self.samplerate)
+        # crop to the span of all segments
+        start = int(min(e["segment_start"] for e in segs) * self.samplerate)
+        end   = int(max(e["segment_end"]   for e in segs) * self.samplerate)
+        wav = y[start:end]
+        wav = torch.from_numpy(wav).float().unsqueeze(0)  # [1, T]
+        # collect cluster IDs
+        labels = [e.get("cluster_id", -100) for e in segs]
+        labels = torch.tensor(labels, dtype=torch.long)   # [S]
+        return wav, labels
 
 def collate_syllable_utterances(batch):
-    batch = [x for x in batch if x is not None]
-    if len(batch) == 0:
+    """
+    Pads waveforms to max T, and label sequences to max S.
+    Returns:
+      waves:      [B,1,T_max]
+      labels:     [B,S_max] filled with -100
+      pad_mask:   [B,S_max] True where padded (ignore positions)
+    """
+    batch = [b for b in batch if b is not None]
+    if not batch:
         return None, None, None
 
-    waveforms, targets, segments = zip(*batch)
-    lengths = [x.size(1) for x in waveforms]
-    max_len = max(lengths)
+    waves, labs = zip(*batch)
+    B = len(waves)
+    # pad waveforms
+    T_max = max(w.size(1) for w in waves)
+    padded_w = torch.zeros(B, 1, T_max)
+    for i, w in enumerate(waves):
+        padded_w[i, :, :w.size(1)] = w
 
-    padded_waveforms = torch.zeros((len(waveforms), 1, max_len), dtype=torch.float32)
-    for i, x in enumerate(waveforms):
-        padded_waveforms[i, :, :x.size(1)] = x
+    # pad labels
+    S_max = max(l.numel() for l in labs)
+    padded_l = torch.full((B, S_max), -100, dtype=torch.long)
+    pad_mask = torch.ones((B, S_max), dtype=torch.bool)
+    for i, l in enumerate(labs):
+        L = l.size(0)
+        padded_l[i, :L] = l
+        pad_mask[i, :L] = False
 
-    all_targets = [t for t in targets]
-    return padded_waveforms, all_targets, segments
+    return padded_w, padded_l, pad_mask

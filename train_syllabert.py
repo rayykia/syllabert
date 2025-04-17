@@ -6,14 +6,12 @@ from syllable_dataset import SyllableDataset, collate_syllable_utterances
 from tqdm import tqdm
 import logging
 
-# Set up basic logging configuration.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
-
 
 def get_device():
     if torch.cuda.is_available():
@@ -23,16 +21,18 @@ def get_device():
     else:
         return torch.device("cpu")
 
-
 def train():
-    torch.autograd.set_detect_anomaly(True)
     device = get_device()
-
-    model = SyllaBERT(input_dim=1,
-                      embed_dim=768,
-                      num_layers=12,
-                      num_heads=12,
-                      num_classes=100).to(device)
+    model = SyllaBERT(
+        input_dim=1,
+        embed_dim=768,
+        num_layers=12,
+        num_heads=12,
+        num_classes=100,
+        dropout=0.1,
+        max_syllables=200,
+        sampling_rate=16000
+    ).to(device)
 
     dataset = SyllableDataset(
         manifest_path="./data/syllabert_clean100/clustering/labeled_manifest.jsonl",
@@ -47,7 +47,6 @@ def train():
     )
 
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
-
     mask_prob = 0.65
     num_epochs = 10
     log_interval = 10
@@ -55,62 +54,53 @@ def train():
     for epoch in range(1, num_epochs+1):
         model.train()
         total_loss = 0.0
-        batch_count = 0
 
-        for batch_idx, (inputs, syllable_labels, segments) in enumerate(tqdm(dataloader, desc=f"Epoch {epoch}"), start=1):
-            if inputs is None:
+        for batch_idx, (waves, labels, pad_mask_data) in enumerate(
+            tqdm(dataloader, desc=f"Epoch {epoch}"), start=1):
+
+            if waves is None:
                 continue
 
-            inputs = inputs.to(device)
+            # Move data to device
+            waves = waves.to(device)       # [B,1,T]
+            labels = labels.to(device)     # [B, S_data]
+            pad_mask_data = pad_mask_data.to(device)  # [B, S_data]
 
-            # Determine feature length via encoder (no masking)
-            with torch.no_grad():
-                feats = model.encoder(inputs)  # [B, T_feat, C]
-            B, T_feat, _ = feats.shape
-
-            # Build frame-level targets and boundary flags of shape [B, T_feat]
-            boundary_targets = torch.zeros((B, T_feat), device=device)
-            frame_targets = torch.full((B, T_feat), -100, dtype=torch.long, device=device)
-
-            for b, (segs, labs) in enumerate(zip(segments, syllable_labels)):
-                for (s, e), cid in zip(segs, labs.tolist()):
-                    # clamp to feature length
-                    s_clamped = max(0, min(s, T_feat))
-                    e_clamped = max(s_clamped+1, min(e, T_feat))
-                    boundary_targets[b, e_clamped-1] = 1
-                    frame_targets[b, s_clamped:e_clamped] = cid
-
-            # Forward pass with syllable-level masking
-            logits, mask_idx, boundary_prob = model(
-                inputs,
-                boundary_targets=boundary_targets,
+            # Forward: segmentation, pooling, masking inside model
+            logits, mask_tokens, pad_mask_model = model(
+                waves,
                 apply_mask=True,
                 mask_prob=mask_prob
             )
+            # logits: [B, S_model, C]
+            B, S_model, _ = logits.size()
 
-            # Compute losses
-            cluster_loss = model.compute_cluster_loss(logits, frame_targets, mask_idx)
-            boundary_loss = model.compute_boundary_loss(boundary_prob, boundary_targets)
-            loss = cluster_loss + boundary_loss
+            # Build target tensor aligned to model's token count
+            target_tokens = torch.full((B, S_model), -100, dtype=torch.long, device=device)
+            for b in range(B):
+                n_valid = (labels[b] != -100).sum().item()
+                n_valid = min(n_valid, S_model)
+                if n_valid > 0:
+                    target_tokens[b, :n_valid] = labels[b, :n_valid]
+
+            # Compute masked prediction loss
+            loss = model.compute_loss(logits, target_tokens, mask_tokens)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
-            batch_count += 1
-
             if batch_idx % log_interval == 0:
-                avg_loss = total_loss / batch_count
+                avg_loss = total_loss / batch_idx
                 logger.info(
-                    f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}], Avg Loss: {avg_loss:.4f}"
+                    f"Epoch [{epoch}/{num_epochs}] Batch [{batch_idx}] Avg Loss: {avg_loss:.4f}"
                 )
 
-        epoch_avg = total_loss / batch_count if batch_count else float('inf')
-        logger.info(f"End Epoch {epoch}: Avg Loss: {epoch_avg:.4f}")
+        epoch_avg = total_loss / len(dataloader)
+        logger.info(f"End Epoch {epoch} Avg Loss {epoch_avg:.4f}")
         model.save_checkpoint(f"checkpoints/syllabert_epoch{epoch}.pt")
         torch.save(model.state_dict(), "checkpoints/syllabert_latest.pt")
-
 
 if __name__ == "__main__":
     train()
