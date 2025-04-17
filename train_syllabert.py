@@ -8,6 +8,7 @@ import argparse
 from datetime import datetime
 from loguru import logger
 import os
+import re
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -29,6 +30,15 @@ def get_device():
         return torch.device("mps")
     else:
         return torch.device("cpu")
+    
+
+def load_latest_checkpoint(checkpoint_dir):
+    checkpoint_files = [f for f in os.listdir(checkpoint_dir) if re.match(r'syllabert_epoch(\d+)\.pt', f)]
+    epochs = [int(re.search(r'epoch(\d+)', f).group(1)) for f in checkpoint_files]
+    latest_epoch = max(epochs)
+    latest_ckpt = f"syllabert_epoch{latest_epoch}.pt"
+    path = os.path.join(checkpoint_dir, latest_ckpt)
+    return path, latest_epoch
 
 
 def train(args):
@@ -43,9 +53,13 @@ def train(args):
     logger.info(f"Loading model: {input_dim=}, {embed_dim=}, {num_layers=}, {num_heads=}, {num_classes=}.")
     model = SyllaBERT(input_dim, embed_dim, num_layers, num_heads, num_classes)
 
+    epoch_n = 0
     if args.c:
-        model.load_state_dict(torch.load("./checkpoints/syllabert_latest.pt"))
+        path, epoch_n = load_latest_checkpoint('./checkpoints/')
+        model.load_state_dict(torch.load(path))
+        logger.info(f"Loaded checkpoint: {path}")
     if args.continue_path is not None:
+        epoch_n = int(re.search(r'epoch(\d+)', args.continue_path).group(1))
         model.load_state_dict(torch.load(args.continue_path))
 
     model = model.to(device)
@@ -70,11 +84,14 @@ def train(args):
     num_epochs = 35
     log_interval = 100
 
-    for epoch in range(1, num_epochs+1):
+
+    for epoch in range(1+epoch_n, num_epochs+1 + epoch_n):
         model.train()
         total_loss = 0.0
         batch_count = 0
         batch_loss = 0.
+
+        logger.info(f'Epoch {epoch}')
 
         with tqdm(total=num_batches, desc=f"Epoch {epoch}", dynamic_ncols=True, leave=False) as pbar:
             # for batch_idx, (inputs, syllable_labels, segments) in enumerate(tqdm(dataloader, desc=f"Epoch {epoch}"), start=1):
