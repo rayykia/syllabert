@@ -4,14 +4,21 @@ from torch.utils.data import DataLoader
 from syllabert_model import SyllaBERT
 from syllable_dataset import SyllableDataset, collate_syllable_utterances
 from tqdm import tqdm
-import logging
+import argparse
+from datetime import datetime
+from loguru import logger
+import os
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logger = logging.getLogger(__name__)
+import warnings
+warnings.filterwarnings("ignore")
+
+now = datetime.now().strftime("%Y-%m-%d_%H-%M")
+
+logger.remove()
+logger.add(lambda msg: tqdm.write(msg, end=""), level="INFO")
+os.makedirs('./logs', exist_ok=True)
+logger.add(f"logs/train_{now}.log", level="INFO", format="{time} | {level} | {message}")
+
 
 def get_device():
     if torch.cuda.is_available():
@@ -21,18 +28,28 @@ def get_device():
     else:
         return torch.device("cpu")
 
-def train():
+
+def train(args):
+    torch.autograd.set_detect_anomaly(True)
     device = get_device()
-    model = SyllaBERT(
-        input_dim=1,
-        embed_dim=768,
-        num_layers=12,
-        num_heads=12,
-        num_classes=100,
-        dropout=0.1,
-        max_syllables=200,
-        sampling_rate=16000
-    ).to(device)
+
+    input_dim=1
+    embed_dim=768
+    num_layers=12
+    num_heads=12
+    num_classes=100
+    logger.info(f"Loading model: {input_dim=}, {embed_dim=}, {num_layers=}, {num_heads=}, {num_classes=}.")
+
+    model = SyllaBERT(input_dim=1,
+                      embed_dim=768,
+                      num_layers=12,
+                      num_heads=12,
+                      num_classes=100).to(device)
+    
+    if args.c:
+        model.load_state_dict(torch.load("./checkpoints/syllabert_latest.pt"))
+    if args.continue_path is not None:
+        model.load_state_dict(torch.load(args.continue_path))
 
     dataset = SyllableDataset(
         manifest_path="./data/syllabert_clean100/clustering/labeled_manifest.jsonl",
@@ -40,16 +57,17 @@ def train():
     )
     dataloader = DataLoader(
         dataset,
-        batch_size=16,
+        batch_size=8,
         shuffle=True,
         collate_fn=collate_syllable_utterances,
         pin_memory=True
     )
+    num_batches = len(dataloader)
 
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     mask_prob = 0.65
-    num_epochs = 10
-    log_interval = 10
+    num_epochs = 35
+    log_interval = 100
 
     for epoch in range(1, num_epochs+1):
         model.train()
@@ -103,4 +121,9 @@ def train():
         torch.save(model.state_dict(), "checkpoints/syllabert_latest.pt")
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--continue', dest='continue_path', required=False, help='path to the model parameters to continue training')
+    parser.add_argument('-c', required=False, action='store_true',help = 'continue training form the latest model')
+    args = parser.parse_args()
+
+    train(args)
