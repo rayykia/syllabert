@@ -44,9 +44,9 @@ def train(args):
     device = get_device()
 
     input_dim=1
-    embed_dim=768
-    num_layers=12
-    num_heads=12
+    embed_dim=768  #768
+    num_layers=8  #12
+    num_heads=8  #12
     num_classes=100
     logger.info(f"Loading model: {input_dim=}, {embed_dim=}, {num_layers=}, {num_heads=}, {num_classes=}.")
 
@@ -55,7 +55,7 @@ def train(args):
                       num_layers=12,
                       num_heads=12,
                       num_classes=100).to(device)
-    
+    epoch_n = 0
     if args.c:
         path, epoch_n = load_latest_checkpoint('./checkpoints/')
         model.load_state_dict(torch.load(path))
@@ -63,6 +63,7 @@ def train(args):
     if args.continue_path is not None:
         epoch_n = int(re.search(r'epoch(\d+)', args.continue_path).group(1))
         model.load_state_dict(torch.load(args.continue_path))
+        logger.info(f"Loaded checkpoint: {args.continue_path}")
 
     dataset = SyllableDataset(
         manifest_path="./data/syllabert_clean100/clustering/labeled_manifest.jsonl",
@@ -77,7 +78,13 @@ def train(args):
     )
     num_batches = len(dataloader)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.Adam(
+        model.parameters(), 
+        lr=1e-4,
+        betas=(0.9, 0.98),
+        eps=1e-6,
+        weight_decay=0.01
+    )
     mask_prob = 0.65
     num_epochs = 35
     log_interval = 100
@@ -86,48 +93,98 @@ def train(args):
     for epoch in range(1+epoch_n, num_epochs+1 + epoch_n):
         model.train()
         total_loss = 0.0
+        batch_loss = 0.
+        batch_count = 0
 
-        for batch_idx, (waves, labels, pad_mask_data) in enumerate(
-            tqdm(dataloader, desc=f"Epoch {epoch}"), start=1):
 
-            if waves is None:
-                continue
+        logger.info(f'Epoch {epoch}')
 
-            # Move data to device
-            waves = waves.to(device)       # [B,1,T]
-            labels = labels.to(device)     # [B, S_data]
-            pad_mask_data = pad_mask_data.to(device)  # [B, S_data]
+        with tqdm(total=num_batches, desc=f"Epoch {epoch}", dynamic_ncols=True, leave=False) as pbar:
+            # for batch_idx, (inputs, syllable_labels, segments) in enumerate(tqdm(dataloader, desc=f"Epoch {epoch}"), start=1):
+            # for batch_idx, (inputs, syllable_labels, segments) in enumerate(dataloader, start=1):
+            for batch_idx, (waves, labels, pad_mask_data) in enumerate(dataloader, start=1):
 
-            # Forward: segmentation, pooling, masking inside model
-            logits, mask_tokens, pad_mask_model = model(
-                waves,
-                apply_mask=True,
-                mask_prob=mask_prob
-            )
-            # logits: [B, S_model, C]
-            B, S_model, _ = logits.size()
+                if waves is None:
+                    continue
 
-            # Build target tensor aligned to model's token count
-            target_tokens = torch.full((B, S_model), -100, dtype=torch.long, device=device)
-            for b in range(B):
-                n_valid = (labels[b] != -100).sum().item()
-                n_valid = min(n_valid, S_model)
-                if n_valid > 0:
-                    target_tokens[b, :n_valid] = labels[b, :n_valid]
+                # Move data to device
+                waves = waves.to(device)       # [B,1,T]
+                labels = labels.to(device)     # [B, S_data]
+                pad_mask_data = pad_mask_data.to(device)  # [B, S_data]
 
-            # Compute masked prediction loss
-            loss = model.compute_loss(logits, target_tokens, mask_tokens)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            if batch_idx % log_interval == 0:
-                avg_loss = total_loss / batch_idx
-                logger.info(
-                    f"Epoch [{epoch}/{num_epochs}] Batch [{batch_idx}] Avg Loss: {avg_loss:.4f}"
+                # Forward: segmentation, pooling, masking inside model
+                logits, mask_tokens, pad_mask_model = model(
+                    waves,
+                    apply_mask=True,
+                    mask_prob=mask_prob
                 )
+                # logits: [B, S_model, C]
+                B, S_model, _ = logits.size()
+
+                # Build target tensor aligned to model's token count
+                target_tokens = torch.full((B, S_model), -100, dtype=torch.long, device=device)
+                for b in range(B):
+                    n_valid = (labels[b] != -100).sum().item()
+                    n_valid = min(n_valid, S_model)
+                    if n_valid > 0:
+                        target_tokens[b, :n_valid] = labels[b, :n_valid]
+
+                # Compute masked prediction loss
+                loss = model.compute_loss(logits, target_tokens, mask_tokens)
+
+                optimizer.zero_grad()
+
+                try:
+                    loss.backward()
+                except RuntimeError as e:
+                    logger.error(f"Backward failed with: {e}")
+                    logger.error(f"Loss: {loss.item()}")
+                    logger.error(f"Any NaN in logits: {torch.isnan(logits).any()}")
+                    logger.error(f"Any NaN in target_tokens: {torch.isnan(target_tokens).any()}")
+                    continue
+
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+                optimizer.step()
+
+                total_loss += loss.item()
+                with torch.no_grad():
+                    total_loss += loss.item()
+                    batch_loss += loss.item()
+                    # if batch_idx % log_interval == 0:
+
+                    #     if batch_idx != 0:
+                    #         avg_batch_loss = batch_loss / log_interval
+                            
+                    #     else:
+                    #         avg_batch_loss = loss.item()
+                    #     logger.info(f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}], Avg Loss: {avg_batch_loss:.4f}")
+                    #     batch_loss = 0.0
+                    
+                    
+
+                    if batch_idx % log_interval == 0:
+                        preds = logits.argmax(dim=-1)
+                        masked_preds = preds[mask_tokens]
+                        masked_targets = target_tokens[mask_tokens]
+                        correct = (masked_preds == masked_targets).sum().item()
+                        total = mask_tokens.sum().item()
+                        acc = correct / total if total > 0 else 0.0
+                        if batch_idx != 0:
+                            avg_batch_loss = batch_loss / log_interval
+                        else:
+                            avg_batch_loss = loss.item()
+                        logger.info(
+                            f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}], "
+                            f"Avg Loss: {avg_batch_loss:.4f}, "
+                            f"Masked Acc: {acc * 100:.2f}% ({correct}/{total})"
+                        )
+                        batch_loss = 0.0
+                pbar.update(1)
+                # if batch_idx % log_interval == 0:
+                #     avg_loss = total_loss / batch_idx
+                #     logger.info(
+                #         f"Epoch [{epoch}/{num_epochs}] Batch [{batch_idx}] Avg Loss: {avg_loss:.4f}"
+                #     )
 
         epoch_avg = total_loss / len(dataloader)
         logger.info(f"End Epoch {epoch} Avg Loss {epoch_avg:.4f}")
