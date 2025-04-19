@@ -150,18 +150,6 @@ def train(args):
                 with torch.no_grad():
                     total_loss += loss.item()
                     batch_loss += loss.item()
-                    # if batch_idx % log_interval == 0:
-
-                    #     if batch_idx != 0:
-                    #         avg_batch_loss = batch_loss / log_interval
-                            
-                    #     else:
-                    #         avg_batch_loss = loss.item()
-                    #     logger.info(f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}], Avg Loss: {avg_batch_loss:.4f}")
-                    #     batch_loss = 0.0
-                    
-                    
-
                     if batch_idx % log_interval == 0:
                         preds = logits.argmax(dim=-1)
                         masked_preds = preds[mask_tokens]
