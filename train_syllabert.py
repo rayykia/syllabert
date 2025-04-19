@@ -1,188 +1,82 @@
+#!/usr/bin/env python
+"""
+train_syllabert.py
+
+Fine‑tune SyllaBERTEncoder (imported as SyllaBERT) on syllable cluster targets.
+"""
+import os
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from syllabert_model import SyllaBERT
+from syllabert_model import SyllaBERT  # alias for SyllaBERTEncoder with projection
 from syllable_dataset import SyllableDataset, collate_syllable_utterances
-from tqdm import tqdm
-import argparse
-from datetime import datetime
-from loguru import logger
-import os
-import re
-
-import warnings
-warnings.filterwarnings("ignore")
-
-now = datetime.now().strftime("%Y-%m-%d_%H-%M")
-
-logger.remove()
-logger.add(lambda msg: tqdm.write(msg, end=""), level="INFO")
-os.makedirs('./logs', exist_ok=True)
-logger.add(f"logs/train_{now}.log", level="INFO", format="{time} | {level} | {message}")
 
 
 def get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
-    
-
-def load_latest_checkpoint(checkpoint_dir):
-    checkpoint_files = [f for f in os.listdir(checkpoint_dir) if re.match(r'syllabert_epoch(\d+)\.pt', f)]
-    epochs = [int(re.search(r'epoch(\d+)', f).group(1)) for f in checkpoint_files]
-    latest_epoch = max(epochs)
-    latest_ckpt = f"syllabert_epoch{latest_epoch}.pt"
-    path = os.path.join(checkpoint_dir, latest_ckpt)
-    return path, latest_epoch
+    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def train(args):
-    torch.autograd.set_detect_anomaly(True)
     device = get_device()
+    # instantiate model: only hubert_pretrained_model arg
+    model = SyllaBERT(
+        hubert_pretrained_model=args.hubert_model
+    ).to(device)
 
-    input_dim=1
-    embed_dim=768  #768
-    num_layers=8  #12
-    num_heads=8  #12
-    num_classes=100
-    logger.info(f"Loading model: {input_dim=}, {embed_dim=}, {num_layers=}, {num_heads=}, {num_classes=}.")
-
-    model = SyllaBERT(input_dim=1,
-                      embed_dim=768,
-                      num_layers=12,
-                      num_heads=12,
-                      num_classes=100).to(device)
-    epoch_n = 0
-    if args.c:
-        path, epoch_n = load_latest_checkpoint('./checkpoints/')
-        model.load_state_dict(torch.load(path))
-        logger.info(f"Loaded checkpoint: {path}")
-    if args.continue_path is not None:
-        epoch_n = int(re.search(r'epoch(\d+)', args.continue_path).group(1))
-        model.load_state_dict(torch.load(args.continue_path))
-        logger.info(f"Loaded checkpoint: {args.continue_path}")
-
+    # prepare data
     dataset = SyllableDataset(
-        manifest_path="./data/syllabert_clean100/clustering/labeled_manifest.jsonl",
-        samplerate=16000
+        manifest_path=args.manifest,
+        samplerate=args.sr
     )
-    dataloader = DataLoader(
+    loader = DataLoader(
         dataset,
-        batch_size=8,
+        batch_size=args.bs,
         shuffle=True,
         collate_fn=collate_syllable_utterances,
         pin_memory=True
     )
-    num_batches = len(dataloader)
 
-    optimizer = optim.Adam(
-        model.parameters(), 
-        lr=1e-4,
-        betas=(0.9, 0.98),
-        eps=1e-6,
-        weight_decay=0.01
-    )
-    mask_prob = 0.65
-    num_epochs = 35
-    log_interval = 100
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 
-
-    for epoch in range(1+epoch_n, num_epochs+1 + epoch_n):
+    for epoch in range(1, args.epochs + 1):
         model.train()
-        total_loss = 0.0
-        batch_loss = 0.
-        batch_count = 0
+        total_loss, steps = 0.0, 0
+        for inputs, targets_list, segments in loader:
+            if inputs is None:
+                continue
+            inputs = inputs.to(device)
+            targets = torch.cat(targets_list).to(device)
+            # forward returns list of (N_syll, num_classes) logits
+            logits_list = model(inputs, args.sr)
+            # flatten and compute loss
+            all_logits = torch.cat(logits_list, dim=0)
+            loss = F.cross_entropy(all_logits, targets, ignore_index=-100)
 
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        logger.info(f'Epoch {epoch}')
+            total_loss += loss.item()
+            steps += 1
 
-        with tqdm(total=num_batches, desc=f"Epoch {epoch}", dynamic_ncols=True, leave=False) as pbar:
-            # for batch_idx, (inputs, syllable_labels, segments) in enumerate(tqdm(dataloader, desc=f"Epoch {epoch}"), start=1):
-            # for batch_idx, (inputs, syllable_labels, segments) in enumerate(dataloader, start=1):
-            for batch_idx, (waves, labels, pad_mask_data) in enumerate(dataloader, start=1):
+        avg_loss = total_loss / steps if steps else 0.0
+        print(f"Epoch {epoch}/{args.epochs}, Loss: {avg_loss:.4f}")
 
-                if waves is None:
-                    continue
+        os.makedirs(args.out_dir, exist_ok=True)
+        ckpt = os.path.join(args.out_dir, f"syllabert_epoch{epoch}.pt")
+        model.save_checkpoint(ckpt)
+        model.save_checkpoint(os.path.join(args.out_dir, "syllabert_latest.pt"))
 
-                # Move data to device
-                waves = waves.to(device)       # [B,1,T]
-                labels = labels.to(device)     # [B, S_data]
-                pad_mask_data = pad_mask_data.to(device)  # [B, S_data]
-
-                # Forward: segmentation, pooling, masking inside model
-                logits, mask_tokens, pad_mask_model = model(
-                    waves,
-                    apply_mask=True,
-                    mask_prob=mask_prob
-                )
-                # logits: [B, S_model, C]
-                B, S_model, _ = logits.size()
-
-                # Build target tensor aligned to model's token count
-                target_tokens = torch.full((B, S_model), -100, dtype=torch.long, device=device)
-                for b in range(B):
-                    n_valid = (labels[b] != -100).sum().item()
-                    n_valid = min(n_valid, S_model)
-                    if n_valid > 0:
-                        target_tokens[b, :n_valid] = labels[b, :n_valid]
-
-                # Compute masked prediction loss
-                loss = model.compute_loss(logits, target_tokens, mask_tokens)
-
-                optimizer.zero_grad()
-
-                try:
-                    loss.backward()
-                except RuntimeError as e:
-                    logger.error(f"Backward failed with: {e}")
-                    logger.error(f"Loss: {loss.item()}")
-                    logger.error(f"Any NaN in logits: {torch.isnan(logits).any()}")
-                    logger.error(f"Any NaN in target_tokens: {torch.isnan(target_tokens).any()}")
-                    continue
-
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-                optimizer.step()
-
-                total_loss += loss.item()
-                with torch.no_grad():
-                    total_loss += loss.item()
-                    batch_loss += loss.item()
-                    if batch_idx % log_interval == 0:
-                        preds = logits.argmax(dim=-1)
-                        masked_preds = preds[mask_tokens]
-                        masked_targets = target_tokens[mask_tokens]
-                        correct = (masked_preds == masked_targets).sum().item()
-                        total = mask_tokens.sum().item()
-                        acc = correct / total if total > 0 else 0.0
-                        if batch_idx != 0:
-                            avg_batch_loss = batch_loss / log_interval
-                        else:
-                            avg_batch_loss = loss.item()
-                        logger.info(
-                            f"Epoch [{epoch}/{num_epochs}], Batch [{batch_idx}], "
-                            f"Avg Loss: {avg_batch_loss:.4f}, "
-                            f"Masked Acc: {acc * 100:.2f}% ({correct}/{total})"
-                        )
-                        batch_loss = 0.0
-                pbar.update(1)
-                # if batch_idx % log_interval == 0:
-                #     avg_loss = total_loss / batch_idx
-                #     logger.info(
-                #         f"Epoch [{epoch}/{num_epochs}] Batch [{batch_idx}] Avg Loss: {avg_loss:.4f}"
-                #     )
-
-        epoch_avg = total_loss / len(dataloader)
-        logger.info(f"End Epoch {epoch} Avg Loss {epoch_avg:.4f}")
-        model.save_checkpoint(f"checkpoints/syllabert_epoch{epoch}.pt")
-        torch.save(model.state_dict(), "checkpoints/syllabert_latest.pt")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
+    import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--continue', dest='continue_path', required=False, help='path to the model parameters to continue training')
-    parser.add_argument('-c', required=False, action='store_true',help = 'continue training form the latest model')
+    parser.add_argument('--manifest', required=True)
+    parser.add_argument('--sr', type=int, default=16000)
+    parser.add_argument('--hubert_model', type=str, default='facebook/hubert-base-ls960')
+    parser.add_argument('--bs', type=int, default=8)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--out_dir', type=str, default='checkpoints')
     args = parser.parse_args()
-
     train(args)
