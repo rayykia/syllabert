@@ -4,6 +4,7 @@ import torch
 import json
 import librosa
 from collections import defaultdict
+from findsylls import segment_waveform
 
 class SyllableDataset(torch.utils.data.Dataset):
     def __init__(self, manifest_path, samplerate=16000):
@@ -51,20 +52,36 @@ def collate_syllable_utterances(batch):
         return None, None, None
 
     waves, labs = zip(*batch)
+
+    num_syll_ds = 0
+    for wav in waves:
+        wav = wav.detach().cpu().numpy().flatten()
+        print(f'{wav.shape =}')
+        syll, _, _ = segment_waveform(wav)
+        num_syll_ds += len(syll)
+
+    print(f'{num_syll_ds = }')
+    
+    print(f'{torch.cat(labs).shape =}')
+
     B = len(waves)
     # pad waveforms
     T_max = max(w.size(1) for w in waves)
-    padded_w = torch.zeros(B, 1, T_max)
+    padded_w = torch.zeros(B, T_max)
     for i, w in enumerate(waves):
-        padded_w[i, :, :w.size(1)] = w
+        padded_w[i, :w.size(1)] = w
 
     # pad labels
     S_max = max(l.numel() for l in labs)
     padded_l = torch.full((B, S_max), -100, dtype=torch.long)
     pad_mask = torch.ones((B, S_max), dtype=torch.bool)
+    total_l = 0
     for i, l in enumerate(labs):
         L = l.size(0)
         padded_l[i, :L] = l
         pad_mask[i, :L] = False
-
-    return padded_w, padded_l, pad_mask
+        total_l += L
+    print(f'{total_l = }')
+    # print(f'{torch.nn.functional.one_hot(torch.cat(labs), num_classes=100).shape =}')
+    one_hot_label = torch.nn.functional.one_hot(torch.cat(labs), num_classes=100)
+    return padded_w, padded_l, pad_mask, one_hot_label

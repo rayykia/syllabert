@@ -42,16 +42,30 @@ def train(args):
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss, steps = 0.0, 0
-        for inputs, targets_list, segments in loader:
+        for inputs, targets_list, segments, one_hot_label in loader:
             if inputs is None:
                 continue
             inputs = inputs.to(device)
-            targets = torch.cat(targets_list).to(device)
+
+
+            # targets = torch.cat(targets_list).to(device)
+            targets = targets_list.to(device)
             # forward returns list of (N_syll, num_classes) logits
+
+
             logits_list = model(inputs, args.sr)
+
             # flatten and compute loss
             all_logits = torch.cat(logits_list, dim=0)
-            loss = F.cross_entropy(all_logits, targets, ignore_index=-100)
+
+
+
+            # loss = F.cross_entropy(all_logits, targets, ignore_index=-100)
+
+            print(f'{one_hot_label.shape = }')
+            print(f'{all_logits.shape = }')
+            raise
+            loss = F.cross_entropy(all_logits, one_hot_label)
 
             optimizer.zero_grad()
             loss.backward()

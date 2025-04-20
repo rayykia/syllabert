@@ -12,8 +12,10 @@ from findsylls import segment_audio  # assumes your segmentation function is imp
 
 def process_librispeech_file(audio_file, output_dir, samplerate=16000, n_mfcc=13):
     base = os.path.splitext(os.path.basename(audio_file))[0]
-    speaker_id = audio_file.split("/")[-3]
-    chapter_id = audio_file.split("/")[-2]
+    speaker_id = 0
+    chapter_id = 0
+    # speaker_id = audio_file.split("/")[-3]
+    # chapter_id = audio_file.split("/")[-2]
     utterance_id = f"{speaker_id}-{chapter_id}-{base}"
 
     try:
