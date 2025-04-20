@@ -92,6 +92,12 @@ def segment_waveform(audio: np.ndarray,
     for i in range(len(troughs) - 1):
         s_idx = troughs[i]
         e_idx = troughs[i+1]
+        # Discard short segments.
+        duration = t[e_idx] - t[s_idx]
+        # print(t[s_idx], t[e_idx], duration)
+        if duration < 0.025:  # skip segments shorter than 25 ms
+            #print(f"Skipping segment due to short duration: {duration:.3f}s")
+            continue
         cands = [p for p in peaks if p > s_idx and p < e_idx]
         if cands:
             vals = A[cands]

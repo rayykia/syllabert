@@ -50,6 +50,7 @@ def train(args):
 
             # targets = torch.cat(targets_list).to(device)
             targets = targets_list.to(device)
+            one_hot_label = one_hot_label.to(device)
             # forward returns list of (N_syll, num_classes) logits
 
 
@@ -62,9 +63,10 @@ def train(args):
 
             # loss = F.cross_entropy(all_logits, targets, ignore_index=-100)
 
-            print(f'{one_hot_label.shape = }')
-            print(f'{all_logits.shape = }')
-            raise
+
+            # raise
+            all_logits = all_logits[:one_hot_label.size(0)]
+
             loss = F.cross_entropy(all_logits, one_hot_label)
 
             optimizer.zero_grad()

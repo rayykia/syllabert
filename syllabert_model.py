@@ -38,7 +38,9 @@ class SyllaBERTEncoder(nn.Module):
         num_syll = 0
         for b in range(B):
             wav_np = waveforms[b].detach().cpu().numpy()
-            print(f'{wav_np.shape = }')
+
+            # print(f'{wav_np.shape = }')
+
             sylls, _, _ = segment_waveform(wav_np, sampling_rate)
             num_syll += len(sylls)
 
@@ -53,7 +55,8 @@ class SyllaBERTEncoder(nn.Module):
                 reps = torch.stack([feats[b, s:e].mean(dim=0) for s,e in segments])
             pooled_list.append(reps)
 
-        print(f'{num_syll =}')
+        # print(f'{num_syll =}')
+
         # pad pools and mask
         max_syll = max(r.size(0) for r in pooled_list)
         C = feats.size(2)
@@ -79,11 +82,11 @@ class SyllaBERTEncoder(nn.Module):
         for b in range(B):
             L = (~mask[b]).sum().item()
             total_l += L
-            print(f'{L = }')
+            # print(f'{L = }')
             # print(f'{x[b].shape = }')
             outputs.append(self.projection(x[b,:L]))
 
-        print(f'{total_l =}')
+        # print(f'{total_l =}')
         return outputs
     
 # alias for compatibility
